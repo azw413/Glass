@@ -332,6 +332,18 @@ pub fn build_listing_rows_for_range_with_progress(
     progress: Option<&Arc<Mutex<Progress>>>,
 ) {
     use glass_arch_arm::format as fmt;
+    // Variable-width ISAs (ARMv7 Thumb/ARM and x86/x86_64) keep their
+    // decoded instructions in `precomputed` and must render through the
+    // facade. The fixed-4-byte `word_at` path below only handles
+    // AArch64 — for x86 it would `break` at the first >4-byte
+    // instruction, producing a short page whose row count disagrees
+    // with `PagedListing`'s prepass (→ index-out-of-bounds panic).
+    if text.precomputed.is_some() {
+        build_listing_rows_precomputed_range(
+            text, symbols, data, first_insn, end_insn, rows,
+        );
+        return;
+    }
     // Per-register origin-row bookkeeping is local to this call —
     // cross-page retro-labels only target rows in the current
     // build (the paged caller accepts losing them for cross-page
@@ -815,41 +827,38 @@ fn assign_arrows(rows: &mut [ListingRow]) {
 ///   * arrows / basic-block separators use the same
 ///     `assign_arrows` pass as the AArch64 path, but we hand it the
 ///     pre-classified terminator info via a tiny shim.
-fn build_listing_rows_armv7(
+/// Build listing rows for the precomputed instruction range
+/// `[first_insn, end_insn)`, appending to `rows`. Used for every
+/// variable-width ISA (ARMv7 Thumb/ARM and x86/x86_64): the
+/// instructions come straight from `text.precomputed` and are
+/// formatted through the `DecodedInsn` facade, so `word_at`'s
+/// fixed-4-byte model — which can't represent a 5+ byte x86
+/// instruction — is bypassed. Does NOT assign arrows; callers attach
+/// those separately (the paged builder from its section-wide map, the
+/// section-wide wrapper via `assign_arrows_armv7`).
+fn build_listing_rows_precomputed_range(
     text: &TextSectionBytes,
     symbols: &glass_arch_arm::SymbolMap,
     data: &DataPeek,
-    progress: Option<&Arc<Mutex<Progress>>>,
-) -> Vec<ListingRow> {
+    first_insn: u32,
+    end_insn: u32,
+    rows: &mut Vec<ListingRow>,
+) {
     use armv8_encode::mc::InstructionInfo;
     let Some(precomputed) = text.precomputed.as_ref() else {
-        return Vec::new();
+        return;
     };
-    let n = precomputed.len();
-    if let Some(p) = progress {
-        if let Ok(mut p) = p.lock() {
-            p.phase = SharedString::from("Disassembling…");
-            p.current = 0;
-            p.total = n;
-        }
-    }
-    let mut rows = Vec::with_capacity(n + n / 8);
-    // ARMv7 `movw + movt` pair tracking. `movw Rd, #lo16` writes the
-    // low half; a subsequent `movt Rd, #hi16` writes the high half
-    // without disturbing the low half. Together they build a 32-bit
-    // absolute constant — almost always a pointer into rodata, which
-    // is the modern PIC compiler's replacement for the literal-pool
-    // pattern. Each slot holds the pending low-16 value for that
-    // register; any non-movt write clears it.
+    let end = (end_insn as usize).min(precomputed.len());
+    let start = (first_insn as usize).min(end);
+    // `movw + movt` / literal-pool pair tracking. `movw Rd, #lo16`
+    // writes the low half; a subsequent `movt Rd, #hi16` writes the
+    // high half, together building a 32-bit absolute (the modern PIC
+    // replacement for a literal pool). Page-local: a pair split across
+    // a page boundary loses its fusion — accepted, since the pair is
+    // almost always intra-block. (Inert for x86, which has no such
+    // idiom.)
     let mut tracker = glass_arch_arm::PageBaseTracker::new();
-    for (i, insn) in precomputed.iter().enumerate() {
-        if i % 1024 == 0 {
-            if let Some(p) = progress {
-                if let Ok(mut p) = p.lock() {
-                    p.current = i;
-                }
-            }
-        }
+    for insn in &precomputed[start..end] {
         let addr = insn.address();
         // Symbol header. Thumb symbol addresses carry the low-bit
         // marker, so check both forms.
@@ -998,19 +1007,42 @@ fn build_listing_rows_armv7(
             });
         }
     }
+}
+
+/// Section-wide listing builder for variable-width ISAs (ARMv7 +
+/// x86/x86_64). Emits every precomputed instruction's rows then
+/// assigns control-flow arrows. The paged builder instead calls
+/// `build_listing_rows_precomputed_range` per page and attaches arrows
+/// from a section-wide map.
+fn build_listing_rows_armv7(
+    text: &TextSectionBytes,
+    symbols: &glass_arch_arm::SymbolMap,
+    data: &DataPeek,
+    progress: Option<&Arc<Mutex<Progress>>>,
+) -> Vec<ListingRow> {
+    let Some(precomputed) = text.precomputed.as_ref() else {
+        return Vec::new();
+    };
+    let n = precomputed.len();
+    if let Some(p) = progress {
+        if let Ok(mut p) = p.lock() {
+            p.phase = SharedString::from("Disassembling…");
+            p.current = 0;
+            p.total = n;
+        }
+    }
+    let mut rows = Vec::with_capacity(n + n / 8);
+    build_listing_rows_precomputed_range(text, symbols, data, 0, n as u32, &mut rows);
     if let Some(p) = progress {
         if let Ok(mut p) = p.lock() {
             p.current = n;
             p.done = true;
         }
     }
-    // ARMv7-aware control-flow arrows. The AArch64 path's
-    // `assign_arrows` decodes each row's bytes as a 4-byte
-    // AArch64 instruction to find branches — that won't work for
-    // variable-width Thumb. We walk the precomputed vector
-    // instead and use the architecture-neutral `mc::ControlFlow`
-    // classification, which gives us "Jump / ConditionalJump /
-    // call / return / fall" for free across all three ISAs.
+    // Architecture-neutral control-flow arrows via the precomputed
+    // vector's `mc::ControlFlow` classifications (the AArch64
+    // `assign_arrows` decodes 4-byte words, which won't work for
+    // variable-width Thumb or x86).
     assign_arrows_armv7(&mut rows, precomputed);
     rows
 }

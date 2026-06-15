@@ -106,17 +106,38 @@ impl PagedHex {
         //
         // We iterate symbols in address order — `SymbolMap`
         // already exposes that.
+        // Header rows are only emitted for symbols whose address falls
+        // *inside this section's byte range* — `build_hex_rows` filters
+        // with `symbols.in_range(row_addr, row_end)`, and the section
+        // spans `[base, base + len)`. The accounting here must use the
+        // same bound: a global `SymbolMap` also contains symbols from
+        // other sections (e.g. every `.text` function sits *below*
+        // `.rodata` on x86_64), and counting those would push
+        // `page_starts[0]` above 0 — making low row indices underflow
+        // the `idx - page_starts[page]` subtraction in
+        // `page_for_row_blocking`.
+        let section_base = data.base;
+        let section_end = data.base + data.bytes.len() as u64;
         let mut page_starts = Vec::with_capacity(n_pages as usize + 1);
         {
             let mut cum_headers: u32 = 0;
             let mut sym_iter = symbols.iter().peekable();
+            // Skip — without counting — every symbol that lives before
+            // this section. They never produce a header row here.
+            while let Some(s) = sym_iter.peek() {
+                if s.address < section_base {
+                    sym_iter.next();
+                } else {
+                    break;
+                }
+            }
             for page_idx in 0..n_pages {
                 let first_byte_row = page_idx * PAGE_BYTE_ROWS;
                 let first_byte_row_addr =
                     data.row_addr(first_byte_row as usize);
-                // Advance past every symbol whose address is
-                // before this page — those are headers for
-                // earlier pages.
+                // Advance past every in-section symbol whose address is
+                // before this page — those are headers for earlier
+                // pages.
                 while let Some(s) = sym_iter.peek() {
                     if s.address < first_byte_row_addr {
                         cum_headers += 1;
@@ -127,9 +148,17 @@ impl PagedHex {
                 }
                 page_starts.push(first_byte_row + cum_headers);
             }
-            // Sentinel: total_rows.
-            while sym_iter.next().is_some() {
-                cum_headers += 1;
+            // Sentinel: total_rows. Count the remaining symbols that
+            // still fall *inside* the section (headers for the final
+            // page); symbols at/after `section_end` belong to later
+            // sections and never emit a header here.
+            while let Some(s) = sym_iter.peek() {
+                if s.address < section_end {
+                    cum_headers += 1;
+                    sym_iter.next();
+                } else {
+                    break;
+                }
             }
             page_starts.push(n_byte_rows + cum_headers);
         }
@@ -181,7 +210,10 @@ impl PagedHex {
     ) -> Option<(Arc<Vec<HexRow>>, usize)> {
         let page_idx = self.page_of(idx)?;
         let page = self.ensure_page_built(page_idx);
-        let off = (idx - self.page_starts[page_idx as usize]) as usize;
+        // `page_of` guarantees `page_starts[page_idx] <= idx`, so this
+        // never underflows in practice; `checked_sub` degrades a future
+        // accounting bug to a blank row instead of a panic.
+        let off = idx.checked_sub(self.page_starts[page_idx as usize])? as usize;
         Some((page, off))
     }
 
@@ -201,7 +233,7 @@ impl PagedHex {
             state.lru.remove(pos);
         }
         state.lru.push_back(page_idx);
-        let off = (idx - self.page_starts[page_idx as usize]) as usize;
+        let off = idx.checked_sub(self.page_starts[page_idx as usize])? as usize;
         Some((page, off))
     }
 
@@ -455,6 +487,37 @@ mod tests {
         let data = data_section(0x1000, 32);
         let p = PagedHex::new(data, symbol_map(vec![sym(0x1000, "first")]), 4);
         assert_eq!(p.total_rows(), 3); // 1 header + 2 byte rows
+    }
+
+    #[test]
+    fn symbols_before_section_do_not_shift_page_starts() {
+        // Regression: a global SymbolMap contains symbols from earlier
+        // sections (e.g. every `.text` function sits below `.rodata` on
+        // x86_64). Those must not be counted as headers for this
+        // section, or `page_starts[0]` becomes > 0 and the first rows
+        // underflow `idx - page_starts[page]` in page_for_row_blocking.
+        let data = data_section(0x1000, 32); // 2 byte rows
+        let before = vec![
+            sym(0x10, "text_fn_a"),
+            sym(0x20, "text_fn_b"),
+            sym(0x30, "text_fn_c"),
+        ];
+        let p = PagedHex::new(data, symbol_map(before), 4);
+        assert_eq!(p.page_starts[0], 0, "leading symbols must not shift page 0");
+        assert_eq!(p.total_rows(), 2, "no in-section headers expected");
+        // Row 0 must resolve to offset 0, not underflow.
+        let (_page, off) = p.page_for_row_blocking(0).expect("row 0");
+        assert_eq!(off, 0);
+    }
+
+    #[test]
+    fn symbols_after_section_do_not_inflate_total_rows() {
+        // Symbols at/after the section end belong to later sections and
+        // must not be counted into total_rows.
+        let data = data_section(0x1000, 32); // ends at 0x1020
+        let after = vec![sym(0x1020, "next_sec_a"), sym(0x2000, "next_sec_b")];
+        let p = PagedHex::new(data, symbol_map(after), 4);
+        assert_eq!(p.total_rows(), 2, "out-of-section symbols must not add rows");
     }
 
     #[test]

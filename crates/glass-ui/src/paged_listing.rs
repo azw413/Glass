@@ -151,12 +151,7 @@ impl PagedListing {
         let mut tracker = glass_arch_arm::PageBaseTracker::new();
         let mut x_pages: [Option<u64>; 32] = [None; 32];
         let mut cum_rows: u32 = 0;
-
-        // Sym iterator advances in parallel with the insn walk —
-        // we never look up a symbol by address with the map.
-        let mut sym_addrs: Vec<u64> = symbols.iter().map(|s| s.address).collect();
-        sym_addrs.sort();
-        let mut sym_cursor = 0usize;
+        let is_precomputed = text.precomputed.is_some();
 
         for insn_idx in 0..n_insns {
             // Page boundary: snapshot state.
@@ -172,36 +167,30 @@ impl PagedListing {
                 );
             }
             let addr = text.addr_of(insn_idx as usize);
-            // Symbol-header count for this insn: advance the cursor
-            // past every symbol with addr <= insn_addr; count the
-            // one at exactly insn_addr (if any) as a header for it.
-            while sym_cursor < sym_addrs.len() && sym_addrs[sym_cursor] < addr {
-                // Symbols that fall *between* insns (e.g. data labels
-                // in the middle of a code section's range) still
-                // produce a header row — the existing build attaches
-                // them to the next instruction's row, so we count
-                // them too.
+            // Header row — count it iff the *builder* would emit one.
+            // Both builders emit a header only for a symbol that starts
+            // exactly at this instruction's address (`symbols.at(addr)`,
+            // plus the Thumb `|1` marker form). Symbols elsewhere — in
+            // other sections, or between instructions — never produce a
+            // header here, so they must NOT be counted. Counting the
+            // whole global symbol map (every later-section symbol, e.g.
+            // all of `.text` when viewing a code section that sits
+            // below `.rodata`) is what previously inflated the row
+            // total and panicked the listing on x86.
+            if symbols.at(addr).or_else(|| symbols.at(addr | 1)).is_some() {
                 cum_rows += 1;
-                sym_cursor += 1;
-            }
-            if sym_cursor < sym_addrs.len() && sym_addrs[sym_cursor] == addr {
-                cum_rows += 1;
-                sym_cursor += 1;
             }
             // The instruction row itself.
             cum_rows += 1;
-            // Decode just enough to know if it's a terminator and
-            // to maintain ADRP state.
-            let (terminates, dest_x, is_adrp, adrp_page) =
+            // Decode for ADRP page-base tracking (AArch64 only) plus
+            // the AArch64 terminator classification.
+            let (aarch64_terminates, dest_x, is_adrp, adrp_page) =
                 decode_for_prepass(&text, insn_idx);
-            // Update tracker via the public observe path — but
-            // also mirror the same state into `x_pages` so we can
-            // snapshot it at the next page boundary. Tracker and
-            // snapshot kept in sync so the page builder's tracker
-            // sees the same state regardless of which path it goes
-            // through.
-            if let Some(insn_w) = decoded_at(&text, insn_idx) {
-                tracker.observe(&insn_w);
+            let decoded = decoded_at(&text, insn_idx);
+            // Mirror tracker state into `x_pages` so the page builder's
+            // tracker resumes from the same snapshot at each boundary.
+            if let Some(insn_w) = &decoded {
+                tracker.observe(insn_w);
             }
             if is_adrp {
                 if let Some(d) = dest_x {
@@ -214,16 +203,30 @@ impl PagedListing {
                     x_pages[d as usize] = None;
                 }
             }
+            // Basic-block separator row — match whichever builder runs.
+            // The precomputed builder keys on
+            // `control_flow().is_terminator()`; the AArch64 word builder
+            // uses `fmt::is_terminator(mnemonic)` (via
+            // `decode_for_prepass`, which can only classify 4-byte
+            // AArch64 words — hence the facade read for x86/ARMv7).
+            let terminates = if is_precomputed {
+                decoded
+                    .as_ref()
+                    .map(|i| {
+                        use armv8_encode::mc::InstructionInfo;
+                        i.control_flow().is_terminator()
+                    })
+                    .unwrap_or(false)
+            } else {
+                aarch64_terminates
+            };
             if terminates {
                 cum_rows += 1;
             }
         }
-        // Drain remaining symbols past the section end (rare but
-        // possible if a symbol's address is just past the section).
-        while sym_cursor < sym_addrs.len() {
-            cum_rows += 1;
-            sym_cursor += 1;
-        }
+        // No trailing-symbol drain: symbols past the last instruction
+        // (later sections, padding) never produce a header row, so
+        // counting them would over-shoot the builder's row total.
         // Sentinel.
         page_row_starts.push(cum_rows);
         page_insn_starts.push(n_insns);
@@ -533,21 +536,19 @@ fn build_section_arrows(
     // ~500 ms to populate on a big .text).
     let mut insn_to_row: Vec<u32> = Vec::with_capacity(n_insns as usize);
     let mut header_rows: Vec<u32> = Vec::new();
-    let mut sym_addrs: Vec<u64> = symbols.iter().map(|s| s.address).collect();
-    sym_addrs.sort();
-    let mut sym_cursor = 0usize;
     let mut row_idx: u32 = 0;
     for insn_idx in 0..n_insns {
         let addr = text.addr_of(insn_idx as usize);
-        while sym_cursor < sym_addrs.len() && sym_addrs[sym_cursor] < addr {
+        // Header row iff a symbol starts *exactly* at this instruction —
+        // identical to the builder's `symbols.at(addr)` emission and to
+        // PagedListing's prepass. Counting symbols that fall *between*
+        // instruction addresses (non-4-aligned symbols such as `$d`/`$x`
+        // mapping symbols or data labels) would advance `row_idx` for
+        // rows the builder never emits, so every following arrow's
+        // source/target would render a few rows below the real one.
+        if symbols.at(addr).or_else(|| symbols.at(addr | 1)).is_some() {
             header_rows.push(row_idx);
             row_idx += 1;
-            sym_cursor += 1;
-        }
-        if sym_cursor < sym_addrs.len() && sym_addrs[sym_cursor] == addr {
-            header_rows.push(row_idx);
-            row_idx += 1;
-            sym_cursor += 1;
         }
         // Instruction row.
         insn_to_row.push(row_idx);
@@ -847,6 +848,120 @@ mod tests {
         );
         // 1 header + 4 insns = 5.
         assert_eq!(p.total_rows(), 5);
+    }
+
+    #[test]
+    fn arrows_align_with_instruction_rows_past_off_boundary_symbols() {
+        // Regression: control-flow arrows are positioned by a row count
+        // independent of the row builder. A symbol that does NOT start
+        // at an instruction address (here 0x1002) must not advance that
+        // count — the builder emits no header for it, so counting it
+        // would render the arrow a row below the real branch.
+        // Section: nop; b .+12; nop; nop; nop(target).
+        let words: [u32; 5] = [
+            0xD503201F, // nop            @0x1000
+            0x14000003, // b 0x1010       @0x1004  (imm26=3 ⇒ +12)
+            0xD503201F, // nop            @0x1008
+            0xD503201F, // nop            @0x100c
+            0xD503201F, // nop (target)   @0x1010
+        ];
+        let mut bytes = Vec::new();
+        for w in words {
+            bytes.extend_from_slice(&w.to_le_bytes());
+        }
+        let text = TextSectionBytes {
+            base: 0x1000,
+            bytes: Arc::new(bytes),
+            precomputed: None,
+            arch: armv8_encode::container::Architecture::Aarch64,
+        };
+        // A symbol wedged between two instructions (non-4-aligned).
+        let p = PagedListing::new(text, syms(&[(0x1002, "between")]), empty_peek(), 4);
+
+        // Actual global row that holds the branch instruction.
+        let page = p.build_page(0);
+        let base_row = p.page_row_starts[0];
+        let branch_row = page
+            .iter()
+            .enumerate()
+            .find_map(|(off, row)| match row {
+                ListingRow::Instruction { address, .. } if *address == 0x1004 => {
+                    Some(base_row + off as u32)
+                }
+                _ => None,
+            })
+            .expect("branch instruction row present");
+
+        // The arrow's Source segment must land on exactly that row.
+        let segs = p
+            .arrows_by_row
+            .get(&branch_row)
+            .expect("an arrow segment on the branch row");
+        assert!(
+            segs.iter().any(|s| matches!(s.role, ArrowRole::Source)),
+            "Source arrow must sit on the branch row {branch_row}, not be shifted"
+        );
+    }
+
+    #[test]
+    fn x86_precomputed_paging_is_consistent() {
+        // Regression for two coupled bugs that crashed the x86 listing:
+        //   1. the paged row builder used the fixed-4-byte `word_at`
+        //      path, which `break`s at the first >4-byte instruction
+        //      (lea/call below) → short page;
+        //   2. the prepass counted every global symbol (incl. later
+        //      sections) as a header → inflated row total.
+        // Either makes `sum(page rows) != total_rows()` and panics the
+        // renderer with an out-of-bounds page offset.
+        use armv8_encode::isa::x86::{disassemble_bytes, Bitness};
+        let bytes = vec![
+            0x48, 0x89, 0xd8, // mov rax, rbx            (3 bytes)
+            0x48, 0x8d, 0x05, 0x00, 0x01, 0x00, 0x00, // lea rax,[rip+0x100] (7)
+            0xe8, 0x10, 0x00, 0x00, 0x00, // call rel32  (5 bytes)
+            0xc3, // ret                                 (1 byte)
+        ];
+        let base = 0x1000u64;
+        let decoded = disassemble_bytes(base, &bytes, Bitness::Bits64).expect("decode");
+        let precomputed: Vec<glass_arch_arm::DecodedInsn> =
+            decoded.into_iter().map(glass_arch_arm::DecodedInsn::X86).collect();
+        let n_insns = precomputed.len();
+
+        let make = |far_symbol: bool| {
+            let text = TextSectionBytes {
+                base,
+                bytes: Arc::new(bytes.clone()),
+                precomputed: Some(Arc::new(precomputed.clone())),
+                arch: armv8_encode::container::Architecture::X86_64,
+            };
+            let mut sym_list = vec![(0x1000u64, "start")];
+            if far_symbol {
+                // A symbol from a *later section* — must not add rows.
+                sym_list.push((0x9000, "other_section"));
+            }
+            PagedListing::new(text, syms(&sym_list), empty_peek(), 4)
+        };
+
+        let p = make(false);
+        // The >4-byte lea/call did not truncate the page: every
+        // instruction yields a row (plus the header for "start").
+        let summed: u32 = (0..p.n_pages()).map(|pi| p.build_page(pi).len() as u32).sum();
+        assert_eq!(summed, p.total_rows(), "page rows must sum to total_rows");
+        assert!(
+            p.total_rows() as usize >= n_insns + 1,
+            "expected all {n_insns} insns + header, got {}",
+            p.total_rows()
+        );
+        // No row index underflows or runs past its page.
+        for r in 0..p.total_rows() {
+            let (page, off) = p.page_for_row_blocking(r).expect("row resolves");
+            assert!(off < page.len(), "row {r}: off {off} >= len {}", page.len());
+        }
+        // An out-of-section symbol must not change the row total.
+        assert_eq!(
+            make(true).total_rows(),
+            p.total_rows(),
+            "out-of-section symbol must not inflate row count"
+        );
     }
 
     #[test]
