@@ -403,6 +403,12 @@ pub struct TextSectionBytes {
     pub base: u64,
     pub bytes: Arc<Vec<u8>>,
     pub precomputed: Option<Arc<Vec<glass_arch_arm::DecodedInsn>>>,
+    /// The owning artifact's architecture. Consumers that need an
+    /// ISA-specific decode/preview path (e.g. the binary-pattern
+    /// palette search) read this rather than inferring it from
+    /// `precomputed.is_some()` — that marker is now ambiguous because
+    /// both ARMv7 and x86 populate the precomputed slot.
+    pub arch: armv8_encode::container::Architecture,
 }
 
 /// Owned bytes + base address for a non-text section, used by the hex

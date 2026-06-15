@@ -324,6 +324,11 @@ pub fn build_preview(
                     return s;
                 }
             }
+            Architecture::X86_64 | Architecture::X86 => {
+                if let Some(s) = build_preview_x86(arch, addr, bytes) {
+                    return s;
+                }
+            }
             Architecture::Other => {}
         }
     }
@@ -338,6 +343,28 @@ pub fn build_preview(
 /// AArch64 preview: two fixed-width 32-bit instructions joined with
 /// ` ; `. Returns `None` when alignment / length is unusable so the
 /// caller can fall through to a hex preview.
+/// x86/x86_64 preview. Linear-sweep up to two instructions from
+/// `bytes` at `addr` in the architecture's decode width. Falls back to
+/// `None` (caller emits hex) when the slice doesn't decode cleanly.
+fn build_preview_x86(
+    arch: armv8_encode::container::Architecture,
+    addr: u64,
+    bytes: &[u8],
+) -> Option<String> {
+    use armv8_encode::isa::x86;
+    let bitness = x86::bitness_for_architecture(arch)?;
+    let decoded = x86::disassemble_bytes(addr, bytes, bitness).ok()?;
+    if decoded.is_empty() {
+        return None;
+    }
+    let parts: Vec<String> = decoded
+        .into_iter()
+        .take(2)
+        .map(|i| glass_arch_arm::DecodedInsn::X86(i).format_text())
+        .collect();
+    Some(parts.join(" ; "))
+}
+
 fn build_preview_aarch64(addr: u64, bytes: &[u8]) -> Option<String> {
     if addr % 4 != 0 || bytes.len() < 4 {
         return None;

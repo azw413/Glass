@@ -163,10 +163,18 @@ glass demangle _ZN5glass4mainE
 Linear-sweep disassembly of a text section. When `--section` is
 omitted, picks the first text section in the artifact. Each row
 includes address, raw bytes, mnemonic, operands, the covering
-symbol (if any), and a resolved branch / ADRP target comment.
+symbol (if any), and a resolved branch / ADRP / RIP-relative target
+comment.
+
+Supported architectures: AArch64, ARMv7 (ARM + Thumb), and
+x86 / x86_64 (ELF, Mach-O, and PE/COFF containers). AArch64 and ARM
+decode fixed-width words; x86 is decoded as a variable-length stream.
+Architectures Glass can't decode are reported by `binary-info` and
+should be inspected with `sections` / the GUI hex viewer instead.
 
 ```sh
 glass disasm ./libfoo.so --artifact libfoo.so --section .text --limit 100
+glass disasm ./app.exe   --artifact app.exe   --section .text --limit 100
 ```
 
 ### `decode <word> [--addr <a>]`

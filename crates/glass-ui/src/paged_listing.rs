@@ -815,6 +815,7 @@ mod tests {
             base,
             bytes: Arc::new(bytes),
             precomputed: None,
+            arch: armv8_encode::container::Architecture::Aarch64,
         }
     }
 

@@ -964,6 +964,8 @@ fn arch_label(arch: armv8_encode::container::Architecture) -> &'static str {
     match arch {
         A::Aarch64 => "arm64",
         A::Arm => "arm32",
+        A::X86_64 => "x86_64",
+        A::X86 => "x86",
         A::Other => "other",
     }
 }
@@ -994,11 +996,11 @@ fn build_section_info(container: &armv8_encode::container::Container) -> Vec<Sec
 }
 
 /// True for architectures Glass can produce a typed listing for.
-/// Mirrors `glass_arch_arm::disassemble_function_at` — AArch64 + ARM
-/// (which covers both ARM-mode and Thumb-mode ARMv7 binaries).
+/// Mirrors `glass_arch_arm::disassemble_function_at` — AArch64, ARM
+/// (ARM-mode + Thumb ARMv7), and x86/x86_64.
 fn is_listable(arch: armv8_encode::container::Architecture) -> bool {
     use armv8_encode::container::Architecture as A;
-    matches!(arch, A::Aarch64 | A::Arm)
+    matches!(arch, A::Aarch64 | A::Arm | A::X86_64 | A::X86)
 }
 
 /// Build a `TextSectionBytes` for `section`. When the container is
@@ -1014,8 +1016,14 @@ fn build_text_section_bytes(
     symbol_addresses: &[u64],
 ) -> TextSectionBytes {
     let sec = &container.sections[section_index];
+    // ARMv7 (variable-width Thumb) and x86/x86_64 (variable-length)
+    // both need their instructions precomputed so the listing renderer
+    // doesn't try to decode fixed 4-byte chunks. AArch64 decodes on
+    // demand and leaves the slot empty.
     let precomputed = match container.architecture {
-        armv8_encode::container::Architecture::Arm => {
+        armv8_encode::container::Architecture::Arm
+        | armv8_encode::container::Architecture::X86_64
+        | armv8_encode::container::Architecture::X86 => {
             glass_arch_arm::precompute_section_insns(
                 container,
                 section_index,
@@ -1029,6 +1037,7 @@ fn build_text_section_bytes(
         base: sec.address,
         bytes: Arc::new(sec.bytes.clone()),
         precomputed,
+        arch: container.architecture,
     }
 }
 

@@ -28,16 +28,27 @@
 use armv8_encode::isa::aarch64::DecodedInstruction as Aarch64Insn;
 use armv8_encode::isa::armv7::arm::sweep::ArmDecodedInstruction;
 use armv8_encode::isa::armv7::sweep::ThumbDecodedInstruction;
+use armv8_encode::isa::x86::X86DecodedInstruction;
 use armv8_encode::mc::{ControlFlow, InstructionInfo};
 
 use crate::format as aarch64_fmt;
 
 /// Architecture-neutral decoded instruction.
+///
+/// The `X86` arm wraps `armv8_encode::isa::x86::X86DecodedInstruction`,
+/// which itself carries an `iced_x86::Instruction`. Unlike the ARM
+/// variants (whose neutral operand model lives in `armv8-encode`), the
+/// x86 accessors below read iced's instruction directly — iced is the
+/// operand model for this ISA. x86 has no ADRP/movw-style cross-
+/// instruction fusion (RIP-relative addresses are self-contained and
+/// resolved by [`Self::pcrel_target`]), so the `PageBaseTracker` arm is
+/// a no-op.
 #[derive(Debug, Clone)]
 pub enum DecodedInsn {
     Aarch64(Aarch64Insn),
     Arm(ArmDecodedInstruction),
     Thumb(ThumbDecodedInstruction),
+    X86(X86DecodedInstruction),
 }
 
 impl InstructionInfo for DecodedInsn {
@@ -46,6 +57,7 @@ impl InstructionInfo for DecodedInsn {
             DecodedInsn::Aarch64(i) => i.address(),
             DecodedInsn::Arm(i) => i.address(),
             DecodedInsn::Thumb(i) => i.address(),
+            DecodedInsn::X86(i) => i.address(),
         }
     }
     fn size(&self) -> u64 {
@@ -53,6 +65,7 @@ impl InstructionInfo for DecodedInsn {
             DecodedInsn::Aarch64(i) => i.size(),
             DecodedInsn::Arm(i) => i.size(),
             DecodedInsn::Thumb(i) => i.size(),
+            DecodedInsn::X86(i) => i.size(),
         }
     }
     fn control_flow(&self) -> ControlFlow {
@@ -60,6 +73,7 @@ impl InstructionInfo for DecodedInsn {
             DecodedInsn::Aarch64(i) => i.control_flow(),
             DecodedInsn::Arm(i) => i.control_flow(),
             DecodedInsn::Thumb(i) => i.control_flow(),
+            DecodedInsn::X86(i) => i.control_flow(),
         }
     }
 }
@@ -75,6 +89,13 @@ pub enum RegKind {
     AArch64Gpr32,
     /// ARMv7 GP (`r0..r15`).
     ArmGpr,
+    /// x86 / x86_64 general-purpose register *family*, identified by
+    /// its full-width register (`rax`/`eax`/`ax`/`al` all map to the
+    /// same `index`). Highlighting is deliberately alias-aware: a use
+    /// of `eax` highlights uses of `al`/`ax`/`rax` too, since they are
+    /// the same physical register. `index` is the iced full-register
+    /// number (0 = `rax`, 1 = `rcx`, …).
+    X86Gpr,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -133,6 +154,12 @@ impl DecodedInsn {
                     }
                 }
             }
+            // iced's `Instruction` does not retain the source bytes, so
+            // re-encode it at its own IP to recover them. This is faithful
+            // for the overwhelming majority of instructions; callers that
+            // need byte-exact originals (the hex viewer) read the file /
+            // section bytes directly rather than going through here.
+            DecodedInsn::X86(i) => x86_raw_bytes(i),
         }
     }
 
@@ -156,6 +183,7 @@ impl DecodedInsn {
             }
             DecodedInsn::Arm(i) => crate::arm_format::format_arm(i),
             DecodedInsn::Thumb(i) => crate::arm_format::format_thumb(i),
+            DecodedInsn::X86(i) => x86_format(i),
         }
     }
 
@@ -196,6 +224,16 @@ impl DecodedInsn {
                     if let a7::DecodedOperand::Register(r) = op {
                         if matches!(r.class, a7::RegisterClass::R | a7::RegisterClass::Low) {
                             out.push(RegRef { kind: RegKind::ArmGpr, index: r.index });
+                        }
+                    }
+                }
+            }
+            DecodedInsn::X86(i) => {
+                use iced_x86::OpKind;
+                for op in 0..i.instr.op_count() {
+                    if i.instr.op_kind(op) == OpKind::Register {
+                        if let Some(index) = x86_gpr_family(i.instr.op_register(op)) {
+                            out.push(RegRef { kind: RegKind::X86Gpr, index });
                         }
                     }
                 }
@@ -241,6 +279,18 @@ impl DecodedInsn {
                 }
                 None
             }
+            DecodedInsn::X86(i) => {
+                for op in 0..i.instr.op_count() {
+                    if x86_is_immediate_opkind(i.instr.op_kind(op)) {
+                        // iced's `immediate()` returns the operand value
+                        // already widened per its OpKind (sign-extended
+                        // forms included); reinterpret as i64 to match
+                        // the ARM accessors' signed convention.
+                        return Some(i.instr.immediate(op) as i64);
+                    }
+                }
+                None
+            }
         }
     }
 
@@ -274,6 +324,22 @@ impl DecodedInsn {
                 for op in &i.operands {
                     if let a7::DecodedOperand::BranchTarget(a) = op {
                         return Some(*a);
+                    }
+                }
+                None
+            }
+            DecodedInsn::X86(i) => {
+                use iced_x86::OpKind;
+                // Direct near branches/calls (`jmp`/`jcc`/`call rel`)
+                // carry a NearBranch operand; iced resolves it against
+                // the instruction's IP. Far branches and indirect forms
+                // have no static target.
+                for op in 0..i.instr.op_count() {
+                    if matches!(
+                        i.instr.op_kind(op),
+                        OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64
+                    ) {
+                        return Some(i.instr.near_branch_target());
                     }
                 }
                 None
@@ -315,6 +381,16 @@ impl DecodedInsn {
                     if let a7::DecodedOperand::PcRelative(a) = op {
                         return Some(*a);
                     }
+                }
+                None
+            }
+            DecodedInsn::X86(i) => {
+                // RIP-relative memory operand (`lea rax, [rip+0x..]`,
+                // `mov rax, [rip+0x..]`). iced computes the absolute
+                // target for us — the x86_64 analogue of AArch64's ADRP
+                // page address, but self-contained (no fusion needed).
+                if i.instr.is_ip_rel_memory_operand() {
+                    return Some(i.instr.ip_rel_memory_address());
                 }
                 None
             }
@@ -493,6 +569,10 @@ impl PageBaseTracker {
             DecodedInsn::Arm(_) | DecodedInsn::Thumb(_) => {
                 self.observe_armv7_with_peek(insn, &peek_pool)
             }
+            // x86 has no multi-instruction page-base/literal fusion
+            // idiom: RIP-relative references are self-contained and
+            // surface via `DecodedInsn::pcrel_target`. Nothing to track.
+            DecodedInsn::X86(_) => None,
         }
     }
 
@@ -731,4 +811,79 @@ impl From<ArmDecodedInstruction> for DecodedInsn {
 }
 impl From<ThumbDecodedInstruction> for DecodedInsn {
     fn from(i: ThumbDecodedInstruction) -> Self { DecodedInsn::Thumb(i) }
+}
+impl From<X86DecodedInstruction> for DecodedInsn {
+    fn from(i: X86DecodedInstruction) -> Self { DecodedInsn::X86(i) }
+}
+
+// ---- x86 helpers ---------------------------------------------------
+//
+// These read the `iced_x86::Instruction` carried by the x86 variant.
+// iced *is* the operand model for this ISA, so unlike the ARM arms
+// (which consult `armv8-encode`'s neutral operand enums) the x86 arms
+// reach into iced directly.
+
+/// True for the iced `OpKind`s that denote an immediate operand.
+fn x86_is_immediate_opkind(kind: iced_x86::OpKind) -> bool {
+    use iced_x86::OpKind::*;
+    matches!(
+        kind,
+        Immediate8
+            | Immediate8_2nd
+            | Immediate16
+            | Immediate32
+            | Immediate64
+            | Immediate8to16
+            | Immediate8to32
+            | Immediate8to64
+            | Immediate32to64
+    )
+}
+
+/// Map an iced register to its general-purpose-register *family*
+/// index (0 = `rax`/`eax`/`ax`/`al`, 1 = `rcx`-family, …), or `None`
+/// when the register isn't a GPR (xmm/segment/control/flags/etc.).
+///
+/// Collapsing every width onto the full register's number is what
+/// makes register-use highlighting alias-aware (see [`RegKind::X86Gpr`]).
+fn x86_gpr_family(reg: iced_x86::Register) -> Option<u8> {
+    if !reg.is_gpr() {
+        return None;
+    }
+    // `full_register()` widens AL/AX/EAX → RAX; `number()` yields the
+    // 0-based index within the (full-width) GPR bank.
+    Some(reg.full_register().number() as u8)
+}
+
+/// Pretty-print an x86 instruction with iced's Intel-syntax formatter
+/// (`mov rax, qword ptr [rip+0x1234]`). A fresh formatter per call
+/// keeps this stateless; the listing path can switch to a cached,
+/// tokenised formatter later for coloured chunks.
+fn x86_format(insn: &X86DecodedInstruction) -> String {
+    use iced_x86::{Formatter, IntelFormatter};
+    let mut formatter = IntelFormatter::new();
+    let mut out = String::new();
+    formatter.format(&insn.instr, &mut out);
+    out
+}
+
+/// Recover an x86 instruction's encoded bytes by re-encoding it at its
+/// own IP. iced doesn't retain source bytes on `Instruction`; the
+/// decode width is taken from the instruction's own `code_size()`.
+/// Faithful for nearly all instructions; on the rare re-encode failure
+/// we fall back to a zero-filled buffer of the correct length so the
+/// listing's (4-byte-truncated) bytes column still lines up.
+fn x86_raw_bytes(insn: &X86DecodedInstruction) -> Vec<u8> {
+    use iced_x86::{CodeSize, Encoder};
+    let bitness = match insn.instr.code_size() {
+        CodeSize::Code16 => 16,
+        CodeSize::Code32 => 32,
+        // Unknown (e.g. synthesised) instructions default to 64-bit.
+        CodeSize::Code64 | CodeSize::Unknown => 64,
+    };
+    let mut encoder = Encoder::new(bitness);
+    match encoder.encode(&insn.instr, insn.address) {
+        Ok(_) => encoder.take_buffer(),
+        Err(_) => vec![0u8; insn.size_bytes() as usize],
+    }
 }

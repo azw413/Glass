@@ -3,11 +3,13 @@
 //! Routes by the container's architecture: AArch64 uses the existing
 //! linear sweep over fixed 4-byte chunks; ARMv7 uses the upstream
 //! recursive-descent disassembler so literal pools and the ARM/Thumb
-//! mode split are honored.
+//! mode split are honored; x86/x86_64 uses iced's variable-length
+//! linear sweep over the byte range.
 
-use armv8_encode::container::{Architecture, Container, SectionKind};
+use armv8_encode::container::{Architecture, Container, Section, SectionKind};
 use armv8_encode::isa::aarch64;
 use armv8_encode::isa::armv7;
+use armv8_encode::isa::x86;
 
 use crate::facade::DecodedInsn;
 
@@ -26,7 +28,37 @@ pub fn disassemble_function_at(
     match container.architecture {
         Architecture::Aarch64 => disassemble_function_aarch64(container, entry_addr),
         Architecture::Arm => disassemble_function_arm(container, entry_addr),
+        Architecture::X86_64 | Architecture::X86 => {
+            disassemble_function_x86(container, entry_addr)
+        }
         Architecture::Other => None,
+    }
+}
+
+/// x86/x86_64 path: linear-sweep decode from `entry_addr` to the end of
+/// its covering text section. x86 is variable-length and has no
+/// recursive-descent disassembler in `armv8-encode`; callers that know
+/// the function's extent (via a `SymbolMap`) clamp the result, but the
+/// bare entry-point case sweeps to the section end. Returns `None` when
+/// `entry_addr` is outside every text section.
+fn disassemble_function_x86(
+    container: &Container,
+    entry_addr: u64,
+) -> Option<Vec<DecodedInsn>> {
+    let bitness = x86::bitness_for_architecture(container.architecture)?;
+    let section = container.sections.iter().find(|s| {
+        matches!(s.kind, SectionKind::Text)
+            && entry_addr >= s.address
+            && entry_addr < s.address.saturating_add(s.size)
+    })?;
+    let off = (entry_addr - section.address) as usize;
+    let bytes = section.bytes.get(off..)?;
+    let decoded = x86::disassemble_bytes(entry_addr, bytes, bitness).ok()?;
+    let out: Vec<DecodedInsn> = decoded.into_iter().map(DecodedInsn::X86).collect();
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
     }
 }
 
@@ -127,8 +159,32 @@ pub fn precompute_section_insns(
     }
     match container.architecture {
         Architecture::Arm => precompute_section_arm(section, entry_points),
+        Architecture::X86_64 | Architecture::X86 => {
+            precompute_section_x86(container.architecture, section)
+        }
         _ => None,
     }
+}
+
+/// Linear-sweep every instruction in an x86 text section. Unlike the
+/// ARMv7 path there is no mode split and no recursive descent, so the
+/// `entry_points` list isn't needed — iced decodes the section as one
+/// contiguous stream from its base address. A mid-section decode
+/// failure truncates the result at that point (the tail is typically
+/// data/padding).
+fn precompute_section_x86(
+    architecture: Architecture,
+    section: &Section,
+) -> Option<Vec<DecodedInsn>> {
+    let bitness = x86::bitness_for_architecture(architecture)?;
+    let decoded = match x86::disassemble_bytes(section.address, &section.bytes, bitness) {
+        Ok(d) => d,
+        // `disassemble_bytes` is all-or-nothing on error; fall back to
+        // None so the loader treats the section as non-precomputed
+        // rather than dropping it silently.
+        Err(_) => return None,
+    };
+    Some(decoded.into_iter().map(DecodedInsn::X86).collect())
 }
 
 fn precompute_section_arm(

@@ -524,6 +524,7 @@ mod tests {
                     base: sec.address,
                     bytes: Arc::new(sec.bytes.clone()),
                     precomputed: Some(Arc::new(precomputed)),
+                    arch: container.architecture,
                 },
             );
         }

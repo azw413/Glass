@@ -1155,13 +1155,15 @@ fn dump_string_comments(
     let bin = glass_arch_arm::Arm64Binary::open(&path)?;
     let symbols = glass_arch_arm::SymbolMap::build(&bin.container);
 
-    // Find the requested text section.
+    // Find the requested text section (keeping its index for the
+    // precompute call below).
     let pick = section_arg.as_deref();
-    let text_sec = bin
+    let (section_index, text_sec) = bin
         .container
         .sections
         .iter()
-        .find(|s| {
+        .enumerate()
+        .find(|(_, s)| {
             matches!(s.kind, armv8_encode::container::SectionKind::Text)
                 && pick.map(|p| p == s.name).unwrap_or(true)
         })
@@ -1172,10 +1174,23 @@ fn dump_string_comments(
         text_sec.bytes.len()
     );
 
+    // Variable-length ISAs (ARMv7 Thumb, x86/x86_64) must be
+    // precomputed so the listing renderer doesn't chunk by 4 bytes;
+    // AArch64 decodes on demand and leaves the slot empty. Mirrors
+    // `glass_ui::loader::build_text_section_bytes`.
+    let symbol_addresses: Vec<u64> = symbols.iter().map(|s| s.address).collect();
+    let precomputed = glass_arch_arm::precompute_section_insns(
+        &bin.container,
+        section_index,
+        &symbol_addresses,
+    )
+    .map(Arc::new);
+
     let text = glass_ui::TextSectionBytes {
         base: text_sec.address,
         bytes: Arc::new(text_sec.bytes.clone()),
-        precomputed: None,
+        precomputed,
+        arch: bin.container.architecture,
     };
     // Build a DataPeek from non-text non-debug non-zero-base sections.
     // See LoadedBundle::data_sections loader for matching filter.

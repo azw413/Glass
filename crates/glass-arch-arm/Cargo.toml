@@ -7,6 +7,10 @@ license.workspace = true
 
 [dependencies]
 armv8-encode.workspace = true
+# x86 operand/branch-target introspection over the `iced_x86::Instruction`
+# that armv8-encode's `X86DecodedInstruction` carries (it doesn't re-export
+# iced). Feature set kept in lockstep with the workspace pin.
+iced-x86.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

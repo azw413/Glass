@@ -65,8 +65,16 @@ doc_lazy_continuation = "allow"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
 
 [workspace.dependencies]
-# Disassembly + binary loading (handles ELF + Mach-O internally via `object`)
-armv8-encode = { git = "https://github.com/azw413/armv8-encode", rev = "9e9fde8cbfd6217d8acc25e607ae336258008a53" }
+# Disassembly + binary loading (handles ELF + Mach-O + PE/COFF internally
+# via `object`). Rev 89c2f22 adds the x86/x86_64 ISA (backed by iced-x86)
+# and PE/COFF container support on top of the AArch64/ARMv7 backends.
+armv8-encode = { git = "https://github.com/azw413/armv8-encode", rev = "89c2f228db851e2979b712e58a6b85e0dc79cb29" }
+# x86/x86_64 decode + encode. armv8-encode wraps this internally but does
+# not re-export it; glass-arch-arm needs it directly to introspect the
+# `iced_x86::Instruction` carried by `X86DecodedInstruction` (operands,
+# branch targets, RIP-relative addresses). Keep the version + feature set
+# in lockstep with armv8-encode's own pin to avoid a duplicate build.
+iced-x86 = { version = "1.21", default-features = false, features = ["decoder", "encoder", "block_encoder", "instr_info", "intel", "std"] }
 # Android: APK / DEX / smali. GPL-3.0-only — propagates to the whole workspace.
 smali = { git = "https://github.com/azw413/smali" }
 # UI framework. gpui is publish=false so git-dep only. Pinned to a Zed

@@ -137,6 +137,19 @@ pub fn build_function_cfg(
         return build_function_cfg_armv7(container, symbols, entry_addr);
     }
 
+    // x86/x86_64 path: linear-sweep decode the function's byte range,
+    // then feed the instructions through the same neutral insns->CFG
+    // builder the ARMv7 path uses (it operates purely through the
+    // `InstructionInfo` trait, so it is ISA-agnostic). The `& !1`
+    // mode-bit mask inside that builder is a no-op for x86's even
+    // entry addresses.
+    if matches!(
+        container.architecture,
+        Architecture::X86_64 | Architecture::X86
+    ) {
+        return build_function_cfg_x86(container, symbols, entry_addr);
+    }
+
     // Locate the text section containing `entry_addr`.
     let text_sec = container
         .sections
@@ -152,6 +165,54 @@ pub fn build_function_cfg(
         symbols,
         entry_addr,
     )
+}
+
+/// x86/x86_64-specific CFG construction. Linear-sweeps the function's
+/// byte range — clamped to the covering symbol's extent (or the next
+/// symbol / section end when the size is unknown), mirroring the
+/// AArch64 byte path — then reuses the neutral insns->CFG builder.
+fn build_function_cfg_x86(
+    container: &Container,
+    symbols: &SymbolMap,
+    entry_addr: u64,
+) -> Option<FunctionCfg> {
+    use armv8_encode::container::SectionKind;
+
+    let text_sec = container.sections.iter().find(|s| {
+        matches!(s.kind, SectionKind::Text)
+            && entry_addr >= s.address
+            && entry_addr < s.address.saturating_add(s.size)
+    })?;
+    let section_end = text_sec.address.saturating_add(text_sec.size);
+
+    // Function extent: covering symbol size, else next symbol address,
+    // else section end — always clamped to the section end.
+    let end_addr = {
+        let from_sym = symbols.covering(entry_addr).and_then(|s| {
+            if s.size > 0 {
+                Some(s.address + s.size)
+            } else {
+                None
+            }
+        });
+        let from_next = symbols
+            .iter()
+            .filter(|s| s.address > entry_addr)
+            .map(|s| s.address)
+            .min();
+        from_sym.or(from_next).unwrap_or(section_end).min(section_end)
+    };
+    if end_addr <= entry_addr {
+        return None;
+    }
+
+    // Sweep the whole reachable tail, then trim to the function extent.
+    let mut insns = crate::disasm::disassemble_function_at(container, entry_addr)?;
+    insns.retain(|i| {
+        use armv8_encode::mc::InstructionInfo;
+        i.address() < end_addr
+    });
+    build_function_cfg_armv7_from_insns(&insns, entry_addr)
 }
 
 /// ARMv7-specific CFG construction. Reuses the upstream

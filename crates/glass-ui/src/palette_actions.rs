@@ -505,20 +505,17 @@ impl Shell {
         let mut total_bytes_scanned = 0usize;
         // Text sections — across every artifact.
         for ((aid, name), text) in bundle.text_sections.iter() {
-            // `precomputed.is_some()` is our marker for ARMv7 — the
-            // loader only populates it when the upstream recursive-
-            // descent disassembler ran, which only happens for
-            // `Architecture::Arm`. AArch64 leaves it `None` and uses
-            // fixed 4-byte decode on demand.
-            let arch = if text.precomputed.is_some() {
-                armv8_encode::container::Architecture::Arm
-            } else {
-                armv8_encode::container::Architecture::Aarch64
-            };
+            // Each text section now carries its artifact's real
+            // architecture, so we no longer infer it from the
+            // `precomputed` marker (ambiguous since x86 also populates
+            // that slot).
+            let arch = text.arch;
             let Some(atoms) = atoms_for_arch(arch) else {
-                // No atoms compiled for this artifact's arch —
-                // skip (e.g. an ARMv7 pattern with no AArch64
-                // form against an arm64 lib).
+                // No atoms compiled for this artifact's arch — skip.
+                // Covers an ARMv7 pattern with no AArch64 form against
+                // an arm64 lib, and x86 sections (no x86 ASM-pattern
+                // compiler yet; hex byte-search still scans them via
+                // the arch-agnostic atom set).
                 continue;
             };
             let alabel = crate::search::short_artifact_label(&bundle, aid);
