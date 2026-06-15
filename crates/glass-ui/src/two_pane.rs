@@ -20,6 +20,48 @@ use crate::{
     flatten, LoadedBundle, RowAction, RowKind, Shell, TabKind, VisibleRow,
 };
 
+/// Warning banner for a likely-encrypted (high-entropy) section, or
+/// `None` when the section is below [`crate::HIGH_ENTROPY_THRESHOLD`].
+/// Rendered above the disassembly / hex views so the user knows the
+/// decoded bytes are probably meaningless.
+fn encryption_warning_banner(
+    bundle: &LoadedBundle,
+    artifact: &glass_db::ArtifactId,
+    section: &str,
+    border: gpui::Rgba,
+) -> Option<gpui::AnyElement> {
+    let sec = bundle
+        .native_sections
+        .get(artifact)?
+        .iter()
+        .find(|s| s.name.as_ref() == section)?;
+    if !sec.likely_encrypted() {
+        return None;
+    }
+    Some(
+        div()
+            .w_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .bg(gpui::rgb(0x3A1414))
+            .border_b_1()
+            .border_color(border)
+            .text_color(gpui::rgb(0xFFB4B4))
+            .text_size(px(12.))
+            .child(format!(
+                "\u{26A0} High entropy ({:.2} bits/byte) \u{2014} this section is \
+                 probably encrypted or packed; the decoded output below may be \
+                 meaningless.",
+                sec.entropy
+            ))
+            .into_any_element(),
+    )
+}
+
 pub fn render_two_pane(
     shell: &mut Shell,
     bundle: LoadedBundle,
@@ -224,7 +266,8 @@ pub fn render_two_pane(
             Some(TabKind::SectionMap { artifact }) => shell
                 .render_section_map(&bundle, &artifact, panel, border, fg, dim, cx)
                 .into_any_element(),
-            Some(TabKind::Hex { artifact, .. }) => {
+            Some(TabKind::Hex { artifact, section }) => {
+                let warning = encryption_warning_banner(&bundle, &artifact, &section, border);
                 let (paged_opt, scroll_opt, h_offset, selected_row, selected_byte) =
                     match shell.active_tab.and_then(|i| shell.tabs.get(i)) {
                         Some(tab) => (
@@ -277,6 +320,7 @@ pub fn render_two_pane(
                     .flex()
                     .flex_col()
                     .min_h_0()
+                    .children(warning)
                     .child(
                         div()
                             .flex_1()
@@ -321,7 +365,8 @@ pub fn render_two_pane(
                     .child(h_scrollbar)
                     .into_any_element()
             }
-            Some(TabKind::Listing { artifact, .. }) => {
+            Some(TabKind::Listing { artifact, section }) => {
+                let warning = encryption_warning_banner(&bundle, &artifact, &section, border);
                 let tab_view = shell.active_tab.and_then(|i| shell.tabs.get(i));
                 let (paged_opt, scroll_opt, h_offset, selected_row) =
                     match tab_view {
@@ -363,6 +408,7 @@ pub fn render_two_pane(
                     .flex()
                     .flex_col()
                     .min_h_0()
+                    .children(warning)
                     .child(
                         div()
                             .flex_1()

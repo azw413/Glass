@@ -560,6 +560,14 @@ pub(crate) fn scroll_into_view_with_context(state: &ListState, target_row: usize
 // ---- AndroidManifest XML viewer --------------------------------------------
 
 
+/// Bytes-per-byte Shannon entropy at or above which a section is
+/// flagged as "probably encrypted/packed". Compressed and encrypted
+/// data both approach the 8.0 bits/byte ceiling; ordinary code and
+/// data sit well below (native `.text` is typically ~6.0–6.6, strings
+/// and tables lower still). 7.4 keeps false positives off normal
+/// sections while catching packed/encrypted payloads.
+pub const HIGH_ENTROPY_THRESHOLD: f32 = 7.4;
+
 /// Lightweight, GPU-friendly section descriptor used by the SectionMap
 /// view and (later) the SymbolTable / HexDump views.
 #[derive(Clone, Debug)]
@@ -571,6 +579,20 @@ pub struct SectionInfo {
     /// Convenience: this section's percentage of the artifact's total
     /// section span. Precomputed so the renderer is O(N).
     pub fraction: f32,
+    /// Shannon entropy of the section's on-disk bytes, in bits/byte
+    /// (0.0–8.0). 0.0 for sections with no file content (e.g. `.bss`).
+    /// Drives the encrypted-section tint in the overview bar and the
+    /// warning banner in the disassembly / hex views.
+    pub entropy: f32,
+}
+
+impl SectionInfo {
+    /// True when this section's entropy crosses
+    /// [`HIGH_ENTROPY_THRESHOLD`] — i.e. its contents look encrypted or
+    /// packed and any disassembly is probably meaningless.
+    pub fn likely_encrypted(&self) -> bool {
+        self.entropy >= HIGH_ENTROPY_THRESHOLD
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -991,8 +991,34 @@ fn build_section_info(container: &armv8_encode::container::Container) -> Vec<Sec
             } else {
                 s.size as f32 / total as f32
             },
+            entropy: shannon_entropy(&s.bytes),
         })
         .collect()
+}
+
+/// Shannon entropy of `bytes` in bits/byte (0.0–8.0): `-Σ p·log2(p)`
+/// over the 256 byte-value frequencies. 0.0 for empty input (e.g. a
+/// `.bss` section, which carries no file bytes). Uniformly random data
+/// approaches 8.0; a single repeated byte is 0.0. Used to flag
+/// encrypted / packed sections — see [`crate::HIGH_ENTROPY_THRESHOLD`].
+fn shannon_entropy(bytes: &[u8]) -> f32 {
+    if bytes.is_empty() {
+        return 0.0;
+    }
+    let mut counts = [0u64; 256];
+    for &b in bytes {
+        counts[b as usize] += 1;
+    }
+    let len = bytes.len() as f64;
+    let mut entropy = 0.0f64;
+    for &c in counts.iter() {
+        if c == 0 {
+            continue;
+        }
+        let p = c as f64 / len;
+        entropy -= p * p.log2();
+    }
+    entropy as f32
 }
 
 /// True for architectures Glass can produce a typed listing for.
@@ -1414,5 +1440,52 @@ fn clone_node(n: &Node) -> Node {
             label: label.clone(),
             leaf_id: *leaf_id,
         },
+    }
+}
+
+#[cfg(test)]
+mod entropy_tests {
+    use super::shannon_entropy;
+    use crate::HIGH_ENTROPY_THRESHOLD;
+
+    #[test]
+    fn empty_is_zero() {
+        assert_eq!(shannon_entropy(&[]), 0.0);
+    }
+
+    #[test]
+    fn single_repeated_byte_is_zero() {
+        assert_eq!(shannon_entropy(&[0xABu8; 4096]), 0.0);
+    }
+
+    #[test]
+    fn two_balanced_values_is_one_bit() {
+        // 50% 0x00 / 50% 0xFF → exactly 1 bit/byte.
+        let mut bytes = vec![0u8; 1000];
+        bytes.iter_mut().skip(500).for_each(|b| *b = 0xFF);
+        assert!((shannon_entropy(&bytes) - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn uniform_all_256_values_is_eight_bits() {
+        // Each byte value exactly once → the 8.0 bits/byte ceiling.
+        let bytes: Vec<u8> = (0..=255u8).collect();
+        assert!((shannon_entropy(&bytes) - 8.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn uniform_data_trips_encryption_threshold() {
+        let mut bytes = Vec::new();
+        for _ in 0..4 {
+            bytes.extend(0..=255u8);
+        }
+        assert!(shannon_entropy(&bytes) >= HIGH_ENTROPY_THRESHOLD);
+    }
+
+    #[test]
+    fn ascii_text_stays_below_threshold() {
+        // Ordinary text is low-entropy and must not be flagged.
+        let text = b"the quick brown fox jumps over the lazy dog. ".repeat(100);
+        assert!(shannon_entropy(&text) < HIGH_ENTROPY_THRESHOLD);
     }
 }

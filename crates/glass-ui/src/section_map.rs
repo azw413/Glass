@@ -27,6 +27,28 @@ pub fn brighten(rgb_hex: u32) -> u32 {
     (lift(r) << 16) | (lift(g) << 8) | lift(b)
 }
 
+/// Linearly blend two packed `0xRRGGBB` colours: `t = 0` → `a`,
+/// `t = 1` → `b`.
+fn blend(a: u32, b: u32, t: f32) -> u32 {
+    let mix = |ca: u32, cb: u32| {
+        let v = ca as f32 + (cb as f32 - ca as f32) * t;
+        (v.round() as i32).clamp(0, 0xff) as u32
+    };
+    let r = mix((a >> 16) & 0xff, (b >> 16) & 0xff);
+    let g = mix((a >> 8) & 0xff, (b >> 8) & 0xff);
+    let bl = mix(a & 0xff, b & 0xff);
+    (r << 16) | (g << 8) | bl
+}
+
+/// Shade a section's kind-colour toward a warning red, used for
+/// likely-encrypted (high-entropy) sections in the overview strip. The
+/// cell keeps a trace of its kind colour so the section type stays
+/// legible under the red flag.
+pub fn entropy_tint(rgb_hex: u32) -> u32 {
+    const WARNING_RED: u32 = 0xD0302E;
+    blend(rgb_hex, WARNING_RED, 0.55)
+}
+
 pub fn render_section_map(
     shell: &mut Shell,
     bundle: &LoadedBundle,
@@ -54,10 +76,17 @@ pub fn render_section_map(
     for (i, sec) in sections.iter().enumerate() {
         let f = sec.fraction.max(0.002);
         let is_hot = hovered == Some(i);
-        let cell_bg = if is_hot {
-            rgb(brighten(sec.kind.colour()))
+        // Likely-encrypted sections are shaded toward red so they stand
+        // out in the overview at a glance.
+        let base_colour = if sec.likely_encrypted() {
+            entropy_tint(sec.kind.colour())
         } else {
-            rgb(sec.kind.colour())
+            sec.kind.colour()
+        };
+        let cell_bg = if is_hot {
+            rgb(brighten(base_colour))
+        } else {
+            rgb(base_colour)
         };
         bar_inner = bar_inner.child(
             div()
@@ -568,4 +597,28 @@ fn build_section_tooltip(
     }
 
     Some(body.into_any_element())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{blend, entropy_tint};
+
+    #[test]
+    fn blend_endpoints_and_midpoint() {
+        assert_eq!(blend(0x000000, 0xFFFFFF, 0.0), 0x000000);
+        assert_eq!(blend(0x000000, 0xFFFFFF, 1.0), 0xFFFFFF);
+        // Halfway between black and white is mid-grey (0x80 each).
+        assert_eq!(blend(0x000000, 0xFFFFFF, 0.5), 0x808080);
+    }
+
+    #[test]
+    fn entropy_tint_pushes_toward_red() {
+        // A neutral grey, once flagged, should read clearly red:
+        // red channel well above green/blue.
+        let tinted = entropy_tint(0x808080);
+        let r = (tinted >> 16) & 0xff;
+        let g = (tinted >> 8) & 0xff;
+        let b = tinted & 0xff;
+        assert!(r > g + 0x20 && r > b + 0x20, "not red enough: {tinted:06x}");
+    }
 }
