@@ -132,7 +132,9 @@ impl SlotSpec {
         use Aarch64Opnd::*;
         match o {
             Nil => SlotSpec::Other,
-            Rd | Rn | Rm | Rt | Rt2 | Rs | Ra | RtSys | RmExt | RmSft => SlotSpec::Gp { sp: false },
+            Rd | Rn | Rm | Rt | Rt2 | Rs | Ra | RtSys | RmExt | RmSft | RmLow => {
+                SlotSpec::Gp { sp: false }
+            }
             RdSp | RnSp => SlotSpec::Gp { sp: true },
             Pairreg => SlotSpec::Other,
             Fd | Fn | Fm | Fa | Ft | Ft2 | Sd | Sn | Sm => SlotSpec::FpReg,

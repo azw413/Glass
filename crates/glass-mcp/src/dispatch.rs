@@ -1119,3 +1119,106 @@ fn parse_hex_bytes(s: &str) -> Result<Vec<u8>> {
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod parity_tests {
+    //! Guards the catalog ↔ MCP-dispatcher half of the four-way
+    //! parity rule in CLAUDE.md. `glass_api::skill_catalog()` is the
+    //! single source of truth for the automation surface; every entry
+    //! must have a `match` arm in `call()` above, and every arm must
+    //! correspond to a catalog entry (an orphan arm is a verb an MCP
+    //! client can never reach, since the tool list comes from the
+    //! catalog). This test parses the *actual* arms out of this file's
+    //! source so it cannot drift from a hand-maintained list.
+    use std::collections::BTreeSet;
+
+    /// Verb names dispatched by `call()`, parsed from the `match name`
+    /// block in this file's own source. We read the source rather than
+    /// exercise `call()` because the arms are string patterns with no
+    /// runtime handle. Bounded to the region between `match name {` and
+    /// the `UnknownTool` fall-through so unrelated string-pattern
+    /// matches elsewhere in the file (e.g. `parse_kind`) can't leak in.
+    fn dispatched_verbs() -> BTreeSet<String> {
+        const SRC: &str = include_str!("dispatch.rs");
+        let start = SRC
+            .find("match name {")
+            .expect("dispatch `match name {` not found — did call() change shape?");
+        let region = &SRC[start..];
+        let end = region
+            .find("DispatchError::UnknownTool")
+            .expect("dispatch fall-through `UnknownTool` arm not found");
+        let body = &region[..end];
+
+        // Collect (indent, name) for every `"…" =>` line, then keep
+        // only the shallowest indent. Top-level arms share one indent;
+        // any deeper string-pattern match nested inside an arm body
+        // sits further right and is dropped.
+        let mut candidates: Vec<(usize, String)> = Vec::new();
+        for line in body.lines() {
+            let indent = line.len() - line.trim_start().len();
+            let t = line.trim_start();
+            let Some(rest) = t.strip_prefix('"') else {
+                continue;
+            };
+            let Some(qend) = rest.find('"') else { continue };
+            let name = &rest[..qend];
+            let after = rest[qend + 1..].trim_start();
+            let looks_like_verb = !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+            if after.starts_with("=>") && looks_like_verb {
+                candidates.push((indent, name.to_string()));
+            }
+        }
+        let min_indent = candidates
+            .iter()
+            .map(|(i, _)| *i)
+            .min()
+            .expect("no dispatch arms parsed");
+        candidates
+            .into_iter()
+            .filter(|(i, _)| *i == min_indent)
+            .map(|(_, n)| n)
+            .collect()
+    }
+
+    #[test]
+    fn catalog_and_dispatcher_agree() {
+        let catalog: BTreeSet<String> = glass_api::skill_catalog()
+            .skills
+            .iter()
+            .map(|s| s.name.to_string())
+            .collect();
+        let dispatched = dispatched_verbs();
+
+        let missing: Vec<&String> = catalog.difference(&dispatched).collect();
+        let orphan: Vec<&String> = dispatched.difference(&catalog).collect();
+
+        assert!(
+            missing.is_empty(),
+            "skill catalog lists verb(s) with no MCP dispatch arm in call(): {missing:?}\n\
+             Add a `match name` arm in dispatch.rs for each (see CLAUDE.md skill-catalog parity)."
+        );
+        assert!(
+            orphan.is_empty(),
+            "dispatch.rs handles verb(s) absent from the skill catalog: {orphan:?}\n\
+             These are unreachable (the MCP tool list comes from the catalog). Add a Skill entry \
+             in glass-api/src/skills.rs or remove the arm."
+        );
+    }
+
+    #[test]
+    fn parser_finds_expected_arm_count() {
+        // Sanity check on the source parser itself: if it silently
+        // matched zero (or nearly zero) arms, `catalog_and_dispatcher_agree`
+        // would report every catalog verb as "missing" — a confusing
+        // failure. Assert we parsed a plausible number instead.
+        let n = dispatched_verbs().len();
+        assert!(
+            n >= 50,
+            "source parser found only {n} dispatch arms — the parse likely broke, \
+             not the catalog. Check the `match name {{` / `UnknownTool` anchors."
+        );
+    }
+}

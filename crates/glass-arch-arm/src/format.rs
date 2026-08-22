@@ -155,6 +155,7 @@ fn register_name(r: &Register) -> String {
         RegisterClass::H => format!("h{n}"),
         RegisterClass::S => format!("s{n}"),
         RegisterClass::D => format!("d{n}"),
+        RegisterClass::Q => format!("q{n}"),
     }
 }
 

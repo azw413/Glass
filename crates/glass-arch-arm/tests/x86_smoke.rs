@@ -18,7 +18,7 @@ fn decode_mov_ret_x86_64() {
     let insns = disassemble_bytes(0x1000, &bytes, Bitness::Bits64).expect("decode");
     assert_eq!(insns.len(), 2, "expected two instructions");
 
-    let mov = DecodedInsn::X86(insns[0]);
+    let mov = DecodedInsn::X86(insns[0].clone());
     assert_eq!(mov.address(), 0x1000);
     assert_eq!(mov.width_bytes(), 3);
     let txt = mov.format_text().to_lowercase();
@@ -30,7 +30,7 @@ fn decode_mov_ret_x86_64() {
     assert!(fams.contains(&0), "missing rax family in {fams:?}");
     assert!(fams.contains(&3), "missing rbx family in {fams:?}");
 
-    let ret = DecodedInsn::X86(insns[1]);
+    let ret = DecodedInsn::X86(insns[1].clone());
     assert_eq!(ret.width_bytes(), 1);
     assert_eq!(ret.format_text().to_lowercase(), "ret");
     assert_eq!(ret.branch_target(), None);
@@ -43,7 +43,7 @@ fn branch_target_call_rel32() {
     // next IP = 0x1005, target = 0x1005 + 0x10 = 0x1015.
     let bytes = [0xe8, 0x10, 0x00, 0x00, 0x00];
     let insns = disassemble_bytes(0x1000, &bytes, Bitness::Bits64).expect("decode");
-    let call = DecodedInsn::X86(insns[0]);
+    let call = DecodedInsn::X86(insns[0].clone());
     assert_eq!(call.width_bytes(), 5);
     assert_eq!(call.branch_target(), Some(0x1015));
     // A direct call has no RIP-relative data operand.
@@ -57,7 +57,7 @@ fn rip_relative_pcrel_target() {
     // instruction length = 7, next IP = 0x2007, target = 0x2107.
     let bytes = [0x48, 0x8d, 0x05, 0x00, 0x01, 0x00, 0x00];
     let insns = disassemble_bytes(0x2000, &bytes, Bitness::Bits64).expect("decode");
-    let lea = DecodedInsn::X86(insns[0]);
+    let lea = DecodedInsn::X86(insns[0].clone());
     assert_eq!(lea.width_bytes(), 7);
     assert_eq!(lea.pcrel_target(), Some(0x2107));
 }
@@ -69,7 +69,7 @@ fn decode_32bit_push_ret() {
     let bytes = [0x53, 0xc3];
     let insns = disassemble_bytes(0x8048000, &bytes, Bitness::Bits32).expect("decode");
     assert_eq!(insns.len(), 2);
-    let push = DecodedInsn::X86(insns[0]);
+    let push = DecodedInsn::X86(insns[0].clone());
     let txt = push.format_text().to_lowercase();
     assert!(txt.starts_with("push"), "unexpected: {txt}");
     assert!(txt.contains("ebx"), "operands: {txt}");

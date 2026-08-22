@@ -1389,3 +1389,82 @@ fn dump_bundle(path: PathBuf) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod parity_tests {
+    //! Guards the catalog ↔ CLI half of the four-way parity rule in
+    //! CLAUDE.md. Every automation verb in `glass_api::skill_catalog()`
+    //! must be reachable as a CLI subcommand (MCP-only verbs appear as
+    //! stub variants). The CLI may carry extra non-catalog subcommands
+    //! — legacy verbs, the GUI launcher, `mcp`, `skills` — so the
+    //! catalog is a *subset* of the CLI, and any surplus must be an
+    //! explicitly acknowledged entry in `NON_CATALOG` below.
+    use super::Cli;
+    use clap::CommandFactory;
+    use std::collections::BTreeSet;
+
+    /// CLI subcommands that intentionally have no skill-catalog entry:
+    /// legacy one-offs, the GUI/server launchers, catalog/dev helpers,
+    /// and clap's auto-generated `help`. A new subcommand that lands
+    /// here without being an automation verb must be added to this list
+    /// consciously — which is the prompt to ask "should this be a
+    /// catalog verb + MCP arm instead?".
+    const NON_CATALOG: &[&str] = &[
+        "arm64",           // legacy raw-disassembly subcommand
+        "bundle",          // legacy bundle-inspect subcommand
+        "cfg",             // legacy CFG dump, superseded by the `cfg-of` verb
+        "gui",             // launches the GPUI app, not an analysis verb
+        "mcp",             // runs the MCP server
+        "skills",          // prints the catalog itself
+        "db-inject-tab",   // dev/debug helper
+        "hash-bench",      // benchmark: time ArtifactId hashing
+        "plt-probe",       // diagnostic: dump PLT sections + relocations
+        "string-comments", // dev: verify adrp+add string-literal detection
+        "help",            // clap-generated
+    ];
+
+    fn cli_subcommands() -> BTreeSet<String> {
+        Cli::command()
+            .get_subcommands()
+            .map(|c| c.get_name().to_string())
+            .collect()
+    }
+
+    fn catalog_verbs() -> BTreeSet<String> {
+        glass_api::skill_catalog()
+            .skills
+            .iter()
+            .map(|s| s.name.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn every_catalog_verb_has_a_cli_subcommand() {
+        let cli = cli_subcommands();
+        let catalog = catalog_verbs();
+        let missing: Vec<&String> = catalog.difference(&cli).collect();
+        assert!(
+            missing.is_empty(),
+            "skill catalog lists verb(s) with no CLI subcommand: {missing:?}\n\
+             Add a `Cmd` variant + dispatch arm in glass-cli (a stub for MCP-only verbs; \
+             see CLAUDE.md skill-catalog parity)."
+        );
+    }
+
+    #[test]
+    fn no_unaccounted_cli_subcommand() {
+        let catalog = catalog_verbs();
+        let allow: BTreeSet<String> = NON_CATALOG.iter().map(|s| s.to_string()).collect();
+        let unexpected: Vec<String> = cli_subcommands()
+            .into_iter()
+            .filter(|c| !catalog.contains(c) && !allow.contains(c))
+            .collect();
+        assert!(
+            unexpected.is_empty(),
+            "CLI subcommand(s) that are neither a catalog verb nor a known non-catalog command: \
+             {unexpected:?}\n\
+             If this is a new automation verb, add it to the skill catalog + MCP dispatcher too; \
+             if it's intentionally CLI-only, add it to NON_CATALOG in this test."
+        );
+    }
+}

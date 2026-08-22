@@ -66,9 +66,9 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-cli
 
 [workspace.dependencies]
 # Disassembly + binary loading (handles ELF + Mach-O + PE/COFF internally
-# via `object`). Rev 89c2f22 adds the x86/x86_64 ISA (backed by iced-x86)
-# and PE/COFF container support on top of the AArch64/ARMv7 backends.
-armv8-encode = { git = "https://github.com/azw413/armv8-encode", rev = "89c2f228db851e2979b712e58a6b85e0dc79cb29" }
+# via `object`). Provides the x86/x86_64 ISA (backed by iced-x86) and
+# PE/COFF container support on top of the AArch64/ARMv7 backends.
+armv8-encode = { git = "https://github.com/azw413/armv8-encode", rev = "d5890af568ec9688e39b4485c51e49d2e5b5d592" }
 # x86/x86_64 decode + encode. armv8-encode wraps this internally but does
 # not re-export it; glass-arch-arm needs it directly to introspect the
 # `iced_x86::Instruction` carried by `X86DecodedInstruction` (operands,
